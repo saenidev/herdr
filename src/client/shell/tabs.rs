@@ -1,4 +1,5 @@
 use super::*;
+use crate::client::shell::agent_sidebar::{agent_short_label, is_server_agent};
 
 const TAB_SCROLL_BUTTON_WIDTH: u16 = 3;
 const MIN_TAB_STRIP_WIDTH: u16 =
@@ -21,11 +22,17 @@ pub(crate) fn render_tab_bar(
         .iter()
         .filter(|tab| Some(tab.workspace_id.as_str()) == snapshot.focused_workspace_id.as_deref())
         .collect::<Vec<_>>();
-    let desired_widths = tabs
+    let labels = tabs
         .iter()
-        .map(|tab| {
-            let label = tab_label(tab);
-            display_width(&label).saturating_add(4).max(MIN_TAB_WIDTH)
+        .enumerate()
+        .map(|(index, tab)| tab_label(snapshot, tab, index + 1))
+        .collect::<Vec<_>>();
+    let desired_widths = labels
+        .iter()
+        .map(|label| {
+            display_width(&label.text)
+                .saturating_add(4)
+                .max(MIN_TAB_WIDTH)
         })
         .collect::<Vec<_>>();
     let content = tab_bar_content_area(snapshot, area);
@@ -92,7 +99,8 @@ pub(crate) fn render_tab_bar(
     let mut first_visible = None;
     let mut last_visible = None;
     for (index, tab) in tabs.iter().enumerate().skip(*tab_scroll) {
-        let name = tab_label(tab);
+        let label = &labels[index];
+        let name = &label.text;
         let desired = desired_widths[index];
         let remaining = tab_right.saturating_sub(x);
         let width = desired.min(remaining);
@@ -104,17 +112,22 @@ pub(crate) fn render_tab_bar(
             let base = Style::default()
                 .fg(panel_contrast_fg(palette))
                 .bg(palette.accent);
-            if tab.custom_label {
+            if tab.custom_label || label.server {
                 base.add_modifier(Modifier::BOLD)
             } else {
                 base
             }
+        } else if label.server {
+            Style::default()
+                .fg(palette.accent)
+                .bg(palette.surface0)
+                .add_modifier(Modifier::BOLD)
         } else if tab.custom_label {
             Style::default().fg(palette.overlay1).bg(palette.surface0)
         } else {
             Style::default().fg(palette.overlay0).bg(palette.surface0)
         };
-        let padding = width.saturating_sub(display_width(&name));
+        let padding = width.saturating_sub(display_width(name));
         let left = padding / 2;
         let text = format!(
             "{empty:left$}{name}{empty:right_padding$}",
@@ -371,12 +384,69 @@ fn max_tab_scroll(widths: &[u16], available: u16) -> usize {
     start
 }
 
-fn tab_label(tab: &ClientShellTab) -> String {
-    if tab.zoomed {
-        format!("{} Z", tab.label)
+const TAB_NAME_MAX_WIDTH: usize = 16;
+const SERVER_TAB_MARKER: &str = "◆";
+
+struct TabLabel {
+    text: String,
+    server: bool,
+}
+
+/// Tab strip label: `[◆]<number> <name>[ Z]`. The name is the user-set tab
+/// name, else the agent shown for the tab's primary pane, else that pane's
+/// folder name. Tabs holding a server pane get the server marker.
+fn tab_label(snapshot: &ClientShellSnapshot, tab: &ClientShellTab, number: usize) -> TabLabel {
+    let server = snapshot
+        .agents
+        .iter()
+        .any(|agent| agent.tab_id == tab.tab_id && is_server_agent(agent));
+    let name = if tab.custom_label {
+        Some(tab.label.clone())
     } else {
-        tab.label.clone()
+        auto_tab_name(snapshot, tab).map(|name| crate::ui::truncate_end(&name, TAB_NAME_MAX_WIDTH))
+    };
+    let marker = if server { SERVER_TAB_MARKER } else { "" };
+    let mut text = match name {
+        Some(name) => format!("{marker}{number} {name}"),
+        None => format!("{marker}{number}"),
+    };
+    if tab.zoomed {
+        text.push_str(" Z");
     }
+    TabLabel { text, server }
+}
+
+fn auto_tab_name(snapshot: &ClientShellSnapshot, tab: &ClientShellTab) -> Option<String> {
+    let mut tab_panes = snapshot
+        .panes
+        .iter()
+        .filter(|pane| pane.tab_id == tab.tab_id);
+    // Only the focused tab's focused pane is known; other tabs use their first pane.
+    let primary = snapshot
+        .focused_pane_id
+        .as_deref()
+        .and_then(|focused| tab_panes.clone().find(|pane| pane.pane_id == focused))
+        .or_else(|| tab_panes.next());
+    let tab_agents = || {
+        snapshot
+            .agents
+            .iter()
+            .filter(|agent| agent.tab_id == tab.tab_id)
+    };
+    let agent = primary
+        .and_then(|pane| tab_agents().find(|agent| agent.pane_id == pane.pane_id))
+        .and_then(agent_short_label)
+        .or_else(|| tab_agents().find_map(agent_short_label));
+    if let Some(agent) = agent {
+        return Some(agent.trim().to_owned());
+    }
+    let cwd = primary.and_then(|pane| pane.foreground_cwd.as_deref().or(pane.cwd.as_deref()))?;
+    let path = std::path::Path::new(cwd);
+    let folder = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| cwd.to_owned());
+    (!folder.is_empty()).then_some(folder)
 }
 
 #[cfg(test)]
