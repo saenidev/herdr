@@ -14,7 +14,29 @@ pub(super) struct AgentRow {
     pub(super) pane_id: String,
     pub(super) status: crate::api::schema::AgentStatus,
     pub(super) focused: bool,
+    pub(super) server: bool,
     pub(super) rows: Vec<Vec<crate::ui::ResolvedToken>>,
+}
+
+/// Agent label `keep` reports for long-lived dev servers.
+const SERVER_AGENT_LABEL: &str = "server";
+
+pub(super) fn is_server_agent(agent: &crate::protocol::ClientShellAgent) -> bool {
+    agent
+        .agent
+        .as_deref()
+        .is_some_and(|label| label.eq_ignore_ascii_case(SERVER_AGENT_LABEL))
+}
+
+/// Short agent name shown for a pane: reported display name, then the
+/// user-set agent name, then the agent label.
+pub(super) fn agent_short_label(agent: &crate::protocol::ClientShellAgent) -> Option<&str> {
+    agent
+        .display_agent
+        .as_deref()
+        .or(agent.name.as_deref())
+        .or(agent.agent.as_deref())
+        .filter(|label| !label.trim().is_empty())
 }
 
 pub(super) fn ordered_agent_pane_ids(
@@ -314,6 +336,7 @@ pub(super) fn agent_row(
         pane_id: agent.pane_id.clone(),
         status: agent.agent_status,
         focused: agent.focused,
+        server: is_server_agent(agent),
         rows,
     })
 }
@@ -341,6 +364,13 @@ pub(super) fn render_agent_row(
     };
     let status_style = Style::default().fg(status_color(row.status, palette));
     let secondary = Style::default().fg(palette.overlay0);
+    // Server rows carry the theme accent on their labels so long-lived dev
+    // servers stand out from coding agents.
+    let label_style = if row.server {
+        Style::default().fg(palette.accent)
+    } else {
+        secondary
+    };
     let icon = (
         status_icon(row.status, config.status_indicators),
         Style::default().fg(status_color(row.status, palette)),
@@ -361,7 +391,7 @@ pub(super) fn render_agent_row(
             icon,
             status_style,
             name_style,
-            secondary,
+            label_style,
             secondary,
             palette,
             rect.width.saturating_sub(indent as u16) as usize,

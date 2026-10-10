@@ -171,11 +171,22 @@ fn inactive_auto_named_tab_label_does_not_stack_terminal_faint() {
         tab_id: "tab_2".into(),
         workspace_id: "ws_1".into(),
         number: 2,
-        label: "beta".into(),
+        label: "2".into(),
         custom_label: false,
         zoomed: false,
         focused: false,
         agent_status: AgentStatus::Idle,
+    });
+    // Auto-named tabs show their pane's folder name after the number.
+    projected.panes.push(ClientShellPane {
+        pane_id: "pane_2".into(),
+        workspace_id: "ws_1".into(),
+        tab_id: "tab_2".into(),
+        label: None,
+        cwd: Some("/work/beta".into()),
+        foreground_cwd: None,
+        focused: false,
+        right_click_passthrough: false,
     });
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
     state.set_snapshot(Box::new(projected));
