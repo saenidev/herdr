@@ -149,4 +149,19 @@ for attempt in range(6):
         break
     time.sleep(0.5)
     request["params"]["seq"] = time.time_ns()
+
+if "resume_argv" in params:
+    # Label Remote Control panes so they are not mistaken for interactive
+    # Claude sessions. Herdr drops the label when the Claude process exits.
+    send({
+        "id": f"{request_id}:metadata",
+        "method": "pane.report_metadata",
+        "params": {
+            "pane_id": pane_id,
+            "source": source,
+            "agent": "claude",
+            "display_agent": "claude RC",
+            "seq": time.time_ns(),
+        },
+    })
 PY
