@@ -3,7 +3,7 @@
 # managed by herdr; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=claude
-# HERDR_INTEGRATION_VERSION=10
+# HERDR_INTEGRATION_VERSION=11
 
 set -eu
 
@@ -26,7 +26,9 @@ HERDR_ACTION="$action" HERDR_HOOK_INPUT_FILE="$hook_input_file" python3 - <<'PY'
 import json
 import os
 import random
+import re
 import socket
+import subprocess
 import time
 
 source = "herdr:claude"
@@ -65,36 +67,86 @@ agent_session_path = transcript_path if isinstance(transcript_path, str) and tra
 session_start_source = hook_input.get("source") if hook_event_name == "SessionStart" else None
 if not isinstance(session_start_source, str) or not session_start_source:
     session_start_source = None
-if agent_session_id:
-    params = {
-        "pane_id": pane_id,
-        "source": source,
-        "agent": "claude",
-        "seq": report_seq,
-        "agent_session_id": agent_session_id,
-    }
+
+
+def remote_control_session_id():
+    # `claude remote-control` spawns each session as a child process that
+    # carries its remote session id as `--session-id`. Walk up from this hook
+    # to that child; the hook may run under one or more shells.
+    pid = os.getppid()
+    for _ in range(8):
+        if pid <= 1:
+            return None
+        try:
+            line = subprocess.run(
+                ["ps", "-o", "ppid=", "-o", "args=", "-p", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=1,
+            ).stdout.strip()
+        except Exception:
+            return None
+        parent, _, args = line.partition(" ")
+        match = re.search(r"--session-id[ =]((?:cse|session)_[A-Za-z0-9]+)(?:\s|$)", args)
+        if match:
+            return match.group(1)
+        try:
+            pid = int(parent)
+        except ValueError:
+            return None
+    return None
+
+
+params = {
+    "pane_id": pane_id,
+    "source": source,
+    "agent": "claude",
+    "seq": report_seq,
+}
+if os.environ.get("CLAUDE_CODE_ENVIRONMENT_KIND") == "bridge":
+    # A Remote Control session is resumed by reattaching to it, not with
+    # `claude --resume <local id>`, so report the reattach command instead.
+    remote_session_id = remote_control_session_id()
+    if not remote_session_id:
+        raise SystemExit(0)
+    params["resume_argv"] = ["claude", "remote-control", "--session-id", remote_session_id]
+elif agent_session_id:
+    params["agent_session_id"] = agent_session_id
     if agent_session_path:
         params["agent_session_path"] = agent_session_path
-    if session_start_source:
-        params["session_start_source"] = session_start_source
-    request = {
-        "id": request_id,
-        "method": "pane.report_agent_session",
-        "params": params,
-    }
 else:
     raise SystemExit(0)
+if session_start_source:
+    params["session_start_source"] = session_start_source
+request = {
+    "id": request_id,
+    "method": "pane.report_agent_session",
+    "params": params,
+}
 
-try:
-    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    client.settimeout(0.5)
-    client.connect(socket_path)
-    client.sendall((json.dumps(request) + "\n").encode())
+
+def send(request):
     try:
-        client.recv(4096)
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.settimeout(0.5)
+        client.connect(socket_path)
+        client.sendall((json.dumps(request) + "\n").encode())
+        try:
+            response = client.recv(4096)
+        except Exception:
+            response = b""
+        client.close()
+        return response
     except Exception:
-        pass
-    client.close()
-except Exception:
-    pass
+        return b""
+
+
+# Remote Control spawns its first session right away, sometimes before Herdr
+# has identified Claude in the pane, and Herdr refuses a resume command until
+# then. Retry briefly in that case.
+for attempt in range(6):
+    if b"resume_not_accepted" not in send(request):
+        break
+    time.sleep(0.5)
+    request["params"]["seq"] = time.time_ns()
 PY
